@@ -1,9 +1,15 @@
 // ==UserScript==
 // @name         U校园 AI 答题助手（半自动 · 优化版）
+// @name:zh-CN   U校园 AI 答题助手
 // @namespace    https://tampermonkey.net/
-// @version      2.3.0
-// @description  U校园取题和填入助手，支持独立 API 设置、OpenAI 兼容地址与模型列表。
-// @author       you
+// @version      2.4.1
+// @description  U校园网页答题助手，支持自定义 OpenAI 兼容 API、模型选择和手动或自动填入；答案由用户核对并提交。
+// @author       DreamYuande
+// @copyright    2026 DreamYuande
+// @homepageURL  https://github.com/DreamYuande/ucampus-ai-helper
+// @supportURL   https://github.com/DreamYuande/ucampus-ai-helper/issues
+// @updateURL    https://github.com/DreamYuande/ucampus-ai-helper/releases/latest/download/ucampus-ai-helper.user.js
+// @downloadURL  https://github.com/DreamYuande/ucampus-ai-helper/releases/latest/download/ucampus-ai-helper.user.js
 // @match        *://*.unipus.cn/*
 // @match        *://u.unipus.cn/*
 // @grant        GM_xmlhttpRequest
@@ -12,7 +18,7 @@
 // @connect      api.deepseek.com
 // @connect      *
 // @run-at       document-idle
-// @license MIT
+// @license      MIT
 // ==/UserScript==
 
 (function () {
@@ -35,7 +41,7 @@
         frameWaitMs: 500,
         KEY_STORE: 'uc_ai_api_key',
         MODEL_STORE: 'uc_ai_model',
-        POS_STORE: 'uc_ai_panel_pos',
+        POS_STORE: 'uc_ai_panel_pos_rb',
         AUTOFILL_STORE: 'uc_ai_autofill',
     };
 
@@ -1040,120 +1046,112 @@
      * 8. 界面（Shadow DOM 隔离，避免被页面样式影响）
      * =================================================================== */
     const CSS = `
-        :host { all: initial; }
-        * { box-sizing: border-box; }
+        :host { all: initial; color-scheme: light; }
+        *, *::before, *::after { box-sizing: border-box; }
+        [hidden] { display: none !important; }
+        .panel, .ball {
+            --ink: #252c40; --muted: #566177; --line: #d7deec;
+            --tint: #f3f3fd; --paper: #eef0f5; --white: #fff; --accent: #5048ad;
+            position: fixed; right: 16px; bottom: 16px;
+            right: max(16px, env(safe-area-inset-right)); bottom: max(16px, env(safe-area-inset-bottom));
+            font: 12px/1.5 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+        }
         .panel {
-            position: fixed; right: 20px; top: 96px; width: 340px;
-            background: #fff; color: #1f2328;
-            border: 1px solid #d0d7de; border-radius: 10px;
-            box-shadow: 0 8px 24px rgba(0,0,0,.18);
-            font: 13px/1.6 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+            width: min(300px, calc(100vw - 24px)); max-height: calc(100vh - 24px); max-height: calc(100dvh - 24px);
             display: flex; flex-direction: column; overflow: hidden;
-            z-index: 2147483646;
+            background: var(--white); color: var(--ink); border: 1px solid var(--line);
+            border-radius: 15px; box-shadow: 0 8px 28px rgb(28 37 58 / .14), 0 2px 5px rgb(28 37 58 / .06);
         }
-        .panel[hidden] { display: none; }
-        .hd {
-            display: flex; align-items: center; justify-content: space-between; gap: 8px;
-            padding: 8px 10px; background: linear-gradient(135deg,#2563eb,#3b82f6);
-            color: #fff; cursor: move; user-select: none;
-        }
-        .hd .t { font-weight: 600; font-size: 13px; }
-        .hd .x { cursor: pointer; padding: 0 4px; font-size: 16px; line-height: 1; opacity: .9; }
-        .hd .x:hover { opacity: 1; }
-        .bd { padding: 10px; display: flex; flex-direction: column; gap: 8px; }
-        .bd[hidden] { display: none; }
+        .hd { display: flex; flex: none; align-items: center; gap: 8px; padding: 8px 8px 8px 12px; background: var(--tint); cursor: move; touch-action: none; user-select: none; }
+        .heading { flex: 1; min-width: 0; }
+        .t { margin: 0; font-size: 14px; font-weight: 700; text-wrap: balance; }
+        .version { color: var(--muted); font-variant-numeric: tabular-nums; }
+        .bd { padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow: auto; }
         .row { display: flex; gap: 6px; align-items: center; }
-        .chk {
-            display: flex; align-items: center; gap: 5px; flex: 1 1 auto;
-            font-size: 12px; color: #374151; cursor: pointer; user-select: none;
+        .field { display: grid; gap: 4px; min-width: 0; }
+        .field > label:not(.chk) { font-weight: 600; }
+        .model-field { border-top: 1px solid var(--line); padding-top: 8px; }
+        .chk { display: flex; gap: 6px; align-items: center; min-height: 30px; cursor: pointer; color: var(--muted); }
+        .chk input { margin: 0; accent-color: var(--accent); }
+        .mode-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; background: var(--paper); padding: 3px; border-radius: 9px; }
+        .mode { display: grid; position: relative; min-width: 0; text-align: center; cursor: pointer; }
+        .mode input { position: absolute; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+        .mode span { display: grid; place-items: center; min-height: 32px; padding: 4px; color: var(--muted); border-radius: 6px; }
+        .mode:hover span { background: #e6e9f2; }
+        .mode input:checked + span { color: var(--accent); background: var(--white); font-weight: 650; box-shadow: 0 1px 4px rgb(28 37 58 / .10); }
+        .mode input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: -2px; }
+        .advice, .tip, .model-tag, details, .foot { color: var(--muted); overflow-wrap: anywhere; }
+        .advice strong { color: #a43c29; font-weight: 650; }
+        .model-tag { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        input:not([type=checkbox]):not([type=radio]), select {
+            width: 100%; min-width: 0; min-height: 34px; padding: 6px 8px;
+            border: 1px solid var(--line); border-radius: 7px; background: var(--white); color: var(--ink); font: inherit;
         }
-        .chk input { margin: 0; cursor: pointer; }
-        .tip { font-size: 11px; color: #9aa4b2; line-height: 1.5; }
-        input[type=password], input[type=text], select {
-            flex: 1 1 auto; min-width: 0; padding: 6px 8px; font-size: 12px;
-            border: 1px solid #d0d7de; border-radius: 6px; background: #fff; color: #1f2328;
-        }
-        input:focus, select:focus { outline: 2px solid #93c5fd; outline-offset: -1px; }
-        button {
-            padding: 7px 10px; font-size: 12px; border-radius: 6px; cursor: pointer;
-            border: 1px solid transparent; background: #2563eb; color: #fff;
-            font-family: inherit;
-        }
-        button:hover:not(:disabled) { background: #1d4ed8; }
-        button:disabled { background: #c9ced6; cursor: not-allowed; }
-        button.ghost { background: #fff; color: #374151; border-color: #d0d7de; }
-        button.ghost:hover:not(:disabled) { background: #f3f4f6; }
-        button.primary { flex: 1 1 auto; padding: 9px 10px; font-size: 13px; font-weight: 600; }
-        .ans {
-            min-height: 64px; max-height: 38vh; overflow: auto;
-            background: #f6f8fa; border: 1px solid #e5e7eb; border-radius: 6px;
-            padding: 8px 10px; font-size: 13px; white-space: pre-wrap;
-            overflow-wrap: anywhere; word-break: normal;
-            user-select: text; cursor: text;
-        }
-        .ans.empty { color: #9aa4b2; }
-        .st { font-size: 11px; color: #8a94a6; min-height: 14px; }
-        .st.warn { color: #b45309; }
-        .st.err { color: #b91c1c; }
-        .st.ok { color: #15803d; }
-        details { font-size: 11px; color: #6b7280; }
-        summary { cursor: pointer; user-select: none; }
-        details pre {
-            margin: 6px 0 0; padding: 6px; max-height: 120px; overflow: auto;
-            background: #fafbfc; border: 1px dashed #d8dee4; border-radius: 4px;
-            white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px;
-        }
-        .ball {
-            position: fixed; right: 20px; top: 96px; width: 44px; height: 44px;
-            border-radius: 50%; display: flex; align-items: center; justify-content: center;
-            background: #2563eb; color: #fff; font-size: 18px; cursor: pointer;
-            box-shadow: 0 6px 18px rgba(37,99,235,.45); z-index: 2147483646;
-            user-select: none;
-        }
-        .ball[hidden] { display: none; }
-        .hd button.x { border: 0; background: transparent; color: inherit; }
-        .ball { padding: 0; border: 0; }
-        .ball:hover:not(:disabled) { background: #2563eb; }
-        #btn-settings { flex: 1; text-align: left; }
-        .panel.is-settings { max-height: calc(100vh - 16px); max-height: calc(100dvh - 16px); }
-        .settings { overflow: auto; min-height: 0; }
-        .settings .field { display: grid; gap: 4px; min-width: 0; }
-        .settings .field > label:not(.chk) { font-weight: 600; }
-        .settings .model-field { border-top: 1px solid #d0d7de; padding-top: 8px; }
-        .settings input:not([type=checkbox]) { width: 100%; }
-        .settings select { text-overflow: ellipsis; }
-        .settings button { white-space: nowrap; }
-        .settings .chk[hidden], .settings .st:empty { display: none; }
-        .settings .tip { color: #586575; overflow-wrap: anywhere; }
-        .settings .st:not(.warn, .err, .ok) { color: #586575; }
-        #btn-back { align-self: flex-start; }
-        #btn-settings:focus-visible, .settings :focus-visible {
-            outline: 2px solid #2563eb; outline-offset: 1px;
-        }
-        @media (max-width: 364px) { .panel.is-settings { width: calc(100vw - 16px); right: 8px; } }
+        input::placeholder { color: var(--muted); }
+        select { overflow: hidden; text-overflow: ellipsis; }
+        button { min-height: 34px; padding: 5px 9px; border-radius: 7px; white-space: nowrap; cursor: pointer;
+            border: 1px solid transparent; background: var(--accent); color: var(--white); font: inherit;
+            transition: background-color 120ms ease, transform 100ms ease; }
+        button:hover:not(:disabled) { background: #403996; }
+        button:active:not(:disabled) { transform: scale(.96); }
+        button.ghost:not(:disabled), button:disabled, select:disabled { background: var(--paper); color: var(--muted); }
+        button.ghost:not(:disabled) { color: var(--ink); }
+        button.ghost:hover:not(:disabled) { background: #e3e6f0; }
+        button:disabled { cursor: default; color: #647086; }
+        button.x { width: 36px; height: 36px; padding: 0; background: transparent; color: var(--ink); font-size: 18px; }
+        button.x:hover:not(:disabled) { background: #e7e7f7; }
+        button.primary { font-weight: 650; }
+        .actions .primary { flex: 1; }
+        :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+        .ans { min-height: 32px; max-height: 28vh; padding: 5px 8px; overflow: auto; border: 1px solid var(--line);
+            border-radius: 7px; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+        .ans.empty, .st { color: var(--muted); }
+        .st { overflow-wrap: anywhere; }
+        .st.warn { color: #874917; } .st.err { color: #9a2534; } .st.ok { color: #176142; }
+        .st:empty { display: none; }
+        summary { min-height: 28px; padding: 4px 0; color: var(--accent); cursor: pointer; }
+        details pre { margin: 0; padding: 6px; max-height: 100px; overflow: auto; background: var(--paper); border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
+        .foot { display: flex; flex: none; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 4px 8px;
+            padding: 3px 12px; border-top: 1px solid #e7eaf2; font-variant-numeric: tabular-nums; }
+        .foot a { display: inline-flex; min-height: 34px; align-items: center; gap: 5px; color: var(--accent); text-decoration: none; }
+        .foot a:hover { text-decoration: underline; }
+        .foot svg { width: 16px; height: 16px; fill: currentColor; }
+        .ball { width: 42px; height: 42px; padding: 0; border-radius: 50%; font-size: 14px; font-weight: 650; box-shadow: 0 4px 16px rgb(28 37 58 / .20); }
+        .ball[data-auto="on"] { box-shadow: 0 0 0 2px var(--white), 0 0 0 4px var(--accent), 0 4px 16px rgb(28 37 58 / .20); }
+        @media (max-width: 340px) { .panel, .ball { right: max(12px, env(safe-area-inset-right)); bottom: max(12px, env(safe-area-inset-bottom)); } }
+        @media (pointer: coarse) { button, button.x, .mode span, input:not([type=checkbox]):not([type=radio]), select, .foot a { min-height: 44px; } button.x, .ball { min-width: 44px; } }
+        @media (prefers-reduced-motion: reduce) { button { transition: none; } button:active:not(:disabled) { transform: none; } }
     `;
 
     const HTML = `
-        <div class="panel" id="panel">
+        <section class="panel" id="panel" aria-labelledby="panel-title">
             <div class="hd" id="hd">
-                <span class="t" id="panel-title" tabindex="-1">🤖 U校园 AI 答题助手</span>
-                <button class="x" id="btn-min" title="收起为悬浮球" aria-label="收起为悬浮球" type="button">—</button>
+                <div class="heading">
+                    <h2 class="t" id="panel-title" tabindex="-1">U校园 AI 答题助手</h2>
+                    <div class="version">v2.4.1</div>
+                </div>
+                <button class="x" id="btn-min" title="收起（Alt+M）" aria-label="收起为悬浮球" type="button">−</button>
             </div>
             <div class="bd" id="bd">
+                <div class="mode-tabs" role="radiogroup" aria-label="答题模式">
+                    <label class="mode"><input id="manual-run" type="radio" name="answer-mode" checked><span>手动模式</span></label>
+                    <label class="mode"><input id="auto-run" type="radio" name="answer-mode" title="进页自动读题并填入"><span>自动模式</span></label>
+                </div>
+                <div class="advice"><strong>AI 答案仅供参考</strong> · 核对后手动提交</div>
                 <div class="row">
+                    <span class="model-tag" id="active-model"></span>
                     <button class="ghost" id="btn-settings" type="button" aria-controls="settings">API 设置</button>
-                    <button class="ghost" id="btn-copy" title="复制答案">复制</button>
                 </div>
-                <div class="row">
-                    <label class="chk"><input type="checkbox" id="autofill">取到答案后自动填入</label>
-                    <button class="ghost" id="btn-fill" disabled title="把已获得的答案填进页面（Alt+F）">填入答案</button>
-                </div>
-                <button class="primary" id="btn-ask">获取当前题目答案</button>
-                <div class="ans empty" id="ans">答案将显示在这里…</div>
                 <div class="st" id="st" role="status"></div>
-                <div class="tip">只填答案，不会点提交；页面结构不同时填不准，请核对后再交卷。</div>
+                <div class="ans empty" id="ans" tabindex="0" aria-label="模型答案">答案显示在这里</div>
+                <div class="row actions">
+                    <button class="primary" id="btn-ask" type="button" title="Alt+Q">获取答案</button>
+                    <button class="ghost" id="btn-copy" type="button" disabled>复制</button>
+                    <button class="ghost" id="btn-fill" type="button" disabled title="Alt+F">填入</button>
+                </div>
+                <label class="chk" id="manual-fill-pref"><input type="checkbox" id="autofill">手动取答后直接填入</label>
                 <details id="preview" hidden>
-                    <summary>查看发送给模型的题目</summary>
+                    <summary>查看题目原文</summary>
                     <pre id="preview-pre"></pre>
                 </details>
             </div>
@@ -1180,13 +1178,18 @@
                     <label for="model">模型 ID</label>
                     <input type="text" id="model" placeholder="从列表选取，或手动填写" autocomplete="off" spellcheck="false">
                 </div>
-                <label class="chk"><input type="checkbox" id="auto-run" aria-describedby="auto-run-tip">打开课程页后自动答题</label>
-                <div class="tip" id="auto-run-tip">自动识别、调用模型并填入。可能产生 API 费用，提交由你手动完成。</div>
                 <button class="primary" id="btn-save" type="submit">保存设置</button>
                 <div class="st" id="settings-status" role="status"></div>
             </form>
-        </div>
-        <button class="ball" id="ball" type="button" aria-label="展开答题助手" hidden>🤖</button>
+            <footer class="foot">
+                <span>© 2026 DreamYuande</span>
+                <a href="https://github.com/DreamYuande/ucampus-ai-helper" target="_blank" rel="noopener noreferrer">
+                    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 0a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.65 7.65 0 0 1 4 0c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8 8 0 0 0 8 0Z"/></svg>
+                    GitHub
+                </a>
+            </footer>
+        </section>
+        <button class="ball" id="ball" type="button" aria-label="展开答题助手" hidden>AI</button>
     `;
 
     // shadowRoot.getElementById 在部分环境不存在，统一用 querySelector
@@ -1228,12 +1231,16 @@
         btnCopy: byId(shadow, 'btn-copy'),
         btnFill: byId(shadow, 'btn-fill'),
         autofill: byId(shadow, 'autofill'),
+        manualRun: byId(shadow, 'manual-run'),
         autoRun: byId(shadow, 'auto-run'),
+        activeModel: byId(shadow, 'active-model'),
+        manualFillPref: byId(shadow, 'manual-fill-pref'),
         btnMin: byId(shadow, 'btn-min'),
     };
 
     /* ---------- 状态与展示 ---------- */
     let busy = false;
+    let autoRunEpoch = 0;
     let lastQ = null;      // 最近一次识别到的题目
     let lastA = '';        // 最近一次拿到的答案
 
@@ -1243,18 +1250,39 @@
     }
 
     function setAnswer(text, empty) {
-        if (empty) {
-            ui.ans.textContent = text;
-            ui.ans.classList.add('empty');
-            return;
-        }
         ui.ans.textContent = text;
-        ui.ans.classList.remove('empty');
+        ui.ans.classList.toggle('empty', !!empty);
+        ui.btnCopy.disabled = !!empty;
+    }
+
+    const apiReady = (config) => !!config.model && (config.saved || !!config.key);
+
+    function syncMode(config = getApiConfig()) {
+        const active = config.autoRun === true;
+        ui.manualRun.checked = !active;
+        ui.autoRun.checked = active;
+        ui.ball.dataset.auto = active ? 'on' : 'off';
+        ui.ball.setAttribute('aria-label', '展开答题助手，自动答题' + (active ? '已开启' : '已关闭'));
+        ui.manualFillPref.hidden = active;
+        const model = apiReady(config) ? '模型：' + config.model : '未配置 API';
+        ui.activeModel.textContent = model;
+        ui.activeModel.title = model;
+    }
+
+    function resetAnswer() {
+        lastQ = null;
+        lastA = '';
+        lastAnswerUrl = '';
+        ui.btnFill.disabled = true;
+        showPreview(null);
+        setAnswer('答案显示在这里', true);
     }
 
     function showPreview(q) {
         if (!q || !q.text) {
             ui.preview.hidden = true;
+            ui.preview.open = false;
+            ui.previewPre.textContent = '';
             return;
         }
         const typeName = {
@@ -1270,65 +1298,56 @@
     function setBusy(on) {
         busy = on;
         ui.btnAsk.disabled = on;
-        ui.btnAsk.textContent = on ? '思考中…' : '获取当前题目答案';
+        ui.btnAsk.textContent = on ? '处理中…' : '获取答案';
     }
 
-    /* ---------- 拖拽（header 上按住移动） ---------- */
+    /* ---------- 浮窗位置 ---------- */
     (function enableDrag() {
-        let sx = 0, sy = 0, ox = 0, oy = 0, dragging = false;
-
-        const start = (e) => {
-            if (e.button !== 0 || e.target.closest('button')) return;
-            dragging = true;
-            const r = ui.panel.getBoundingClientRect();
-            ox = r.left; oy = r.top;
-            sx = e.clientX; sy = e.clientY;
-            ui.panel.style.right = 'auto';
-            ui.panel.style.left = ox + 'px';
-            ui.panel.style.top = oy + 'px';
-            e.preventDefault();
-        };
-        const move = (e) => {
-            if (!dragging) return;
-            let x = ox + e.clientX - sx;
-            let y = oy + e.clientY - sy;
-            const w = ui.panel.offsetWidth, h = ui.panel.offsetHeight;
-            x = Math.max(4, Math.min(x, (window.innerWidth || 0) - w - 4));
-            y = Math.max(4, Math.min(y, (window.innerHeight || 0) - h - 4));
-            ui.panel.style.left = x + 'px';
-            ui.panel.style.top = y + 'px';
-        };
-        const end = () => {
-            if (!dragging) return;
-            dragging = false;
-            store.set(CFG.POS_STORE, {
-                left: parseInt(ui.panel.style.left, 10) || 0,
-                top: parseInt(ui.panel.style.top, 10) || 0,
-            });
-        };
-
-        ui.hd.addEventListener('mousedown', start);
-        window.addEventListener('mousemove', move);
-        window.addEventListener('mouseup', end);
-
+        let drag = null;
         const pos = store.get(CFG.POS_STORE, null);
-        if (pos && typeof pos.left === 'number') {
-            ui.panel.style.right = 'auto';
-            ui.panel.style.left = pos.left + 'px';
-            ui.panel.style.top = pos.top + 'px';
+        if (Number.isFinite(pos?.right) && Number.isFinite(pos?.bottom)) {
+            ui.panel.style.right = pos.right + 'px';
+            ui.panel.style.bottom = pos.bottom + 'px';
         }
+
+        ui.hd.addEventListener('pointerdown', (e) => {
+            if (e.button !== 0 || !e.isPrimary || e.target.closest('button')) return;
+            const rect = ui.panel.getBoundingClientRect();
+            drag = { id: e.pointerId, x: e.clientX, y: e.clientY, right: innerWidth - rect.right, bottom: innerHeight - rect.bottom, moved: false };
+            ui.hd.setPointerCapture(e.pointerId);
+        });
+        ui.hd.addEventListener('pointermove', (e) => {
+            if (!drag || drag.id !== e.pointerId) return;
+            const dx = e.clientX - drag.x;
+            const dy = e.clientY - drag.y;
+            if (!drag.moved && Math.hypot(dx, dy) < 3) return;
+            drag.moved = true;
+            ui.panel.style.right = (drag.right - dx) + 'px';
+            ui.panel.style.bottom = (drag.bottom - dy) + 'px';
+            keepOnScreen();
+        });
+        ui.hd.addEventListener('lostpointercapture', (e) => {
+            if (!drag || drag.id !== e.pointerId) return;
+            if (drag.moved) {
+                store.set(CFG.POS_STORE, {
+                    right: parseFloat(ui.panel.style.right),
+                    bottom: parseFloat(ui.panel.style.bottom),
+                });
+            }
+            drag = null;
+        });
     })();
 
     function keepOnScreen() {
-        const el = ui.panel.hidden ? ui.ball : ui.panel;
-        const rect = el.getBoundingClientRect();
-        const left = Math.max(8, Math.min(rect.left, window.innerWidth - rect.width - 8));
-        const top = Math.max(8, Math.min(rect.top, window.innerHeight - rect.height - 8));
-        if (left !== rect.left) {
-            el.style.right = 'auto';
-            el.style.left = left + 'px';
-        }
-        if (top !== rect.top) el.style.top = top + 'px';
+        if (ui.panel.hidden) return;
+        const rect = ui.panel.getBoundingClientRect();
+        const clamp = (offset, room) => Math.max(8, Math.min(offset, room - 8));
+        const right = innerWidth - rect.right;
+        const bottom = innerHeight - rect.bottom;
+        const nextRight = clamp(right, innerWidth - rect.width);
+        const nextBottom = clamp(bottom, innerHeight - rect.height);
+        if (right !== nextRight) ui.panel.style.right = nextRight + 'px';
+        if (bottom !== nextBottom) ui.panel.style.bottom = nextBottom + 'px';
     }
     window.addEventListener('resize', keepOnScreen);
     if (typeof ResizeObserver === 'function') new ResizeObserver(keepOnScreen).observe(ui.panel);
@@ -1336,13 +1355,8 @@
 
     /* ---------- 收起 / 展开 ---------- */
     function minimize() {
-        const r = ui.panel.getBoundingClientRect();
         ui.panel.hidden = true;
         ui.ball.hidden = false;
-        ui.ball.style.right = 'auto';
-        ui.ball.style.left = Math.max(4, r.left) + 'px';
-        ui.ball.style.top = Math.max(4, Math.min(r.top, (window.innerHeight || 0) - 48)) + 'px';
-        keepOnScreen();
         ui.ball.focus({ preventScroll: true });
     }
 
@@ -1461,10 +1475,11 @@
             draftBase = config.base;
             resetModelList();
         }
-        ui.autoRun.checked = config.autoRun === true;
+        autoRunEpoch++;
         ui.bd.hidden = true;
         ui.settings.hidden = false;
-        ui.panel.classList.add('is-settings');
+        ui.btnSettings.hidden = true;
+        updateAutoWatch();
         ui.title.textContent = 'API 设置';
         updateKeyHint();
         ui.title.focus({ preventScroll: true });
@@ -1477,8 +1492,9 @@
     function showHome() {
         ui.settings.hidden = true;
         ui.bd.hidden = false;
-        ui.panel.classList.remove('is-settings');
-        ui.title.textContent = '🤖 U校园 AI 答题助手';
+        ui.btnSettings.hidden = false;
+        ui.title.textContent = 'U校园 AI 答题助手';
+        syncMode();
         ui.btnSettings.focus({ preventScroll: true });
         keepOnScreen();
         updateAutoWatch();
@@ -1526,7 +1542,7 @@
             ui.base.focus();
             return;
         }
-        const config = { base, key: keyForBase(base), model: ui.model.value.trim(), autoRun: ui.autoRun.checked };
+        const config = { base, key: keyForBase(base), model: ui.model.value.trim(), autoRun: getApiConfig().autoRun === true };
         try {
             if (typeof GM_setValue !== 'function') throw new Error('storage');
             GM_setValue(CFG.API_STORE, config);
@@ -1548,7 +1564,7 @@
     // 与原版一致，记住自动填入偏好；不会点击提交。
     ui.autofill.checked = store.get(CFG.AUTOFILL_STORE, true) !== false;
     ui.autofill.addEventListener('change', () => store.set(CFG.AUTOFILL_STORE, ui.autofill.checked));
-    const autoFillOn = () => ui.autofill.checked;
+    const autoFillOn = () => ui.autofill.checked || ui.autoRun.checked;
 
     /* ---------- 复制 ---------- */
     async function copyAnswer() {
@@ -1569,8 +1585,10 @@
             ta.style.cssText = 'position:fixed;left:-9999px;top:0;';
             document.body.appendChild(ta);
             ta.select();
-            document.execCommand('copy');
-            document.body.removeChild(ta);
+            let copied;
+            try { copied = document.execCommand('copy'); }
+            finally { ta.remove(); }
+            if (!copied) throw new Error('copy');
             setStatus('已复制到剪贴板', 'ok');
         } catch (e) {
             setStatus('复制失败，请手动选中文字复制', 'err');
@@ -1601,16 +1619,17 @@
             return;
         }
         filling = true;
+        const requestUrl = lastAnswerUrl;
         ui.btnFill.disabled = true;
         setStatus('正在填入…');
         try {
-            const r = await applyAnswer(lastQ, lastA, () => lastAnswerUrl === location.href);
-            setStatus(fillMessage(r), r && r.filled > 0 && !r.note ? 'ok' : 'warn');
+            const r = await applyAnswer(lastQ, lastA, () => requestUrl === location.href);
+            if (requestUrl === location.href) setStatus(fillMessage(r), r && r.filled > 0 && !r.note ? 'ok' : 'warn');
         } catch (e) {
-            setStatus('填入失败：' + ((e && e.message) || e), 'err');
+            if (requestUrl === location.href) setStatus('填入失败：' + ((e && e.message) || e), 'err');
         } finally {
             filling = false;
-            ui.btnFill.disabled = false;
+            ui.btnFill.disabled = !lastA || lastAnswerUrl !== location.href;
             scheduleAuto();
         }
     }
@@ -1621,9 +1640,10 @@
     async function onAsk(automaticQuestion = null) {
         if (busy || filling) return;
         const automatic = !!automaticQuestion;
+        const epoch = autoRunEpoch;
         const requestUrl = location.href;
         const config = getApiConfig();
-        if (!config.model || (!config.saved && !config.key)) {
+        if (!apiReady(config)) {
             if (automatic) return;
             showSettings();
             fieldStatus(ui.settingsStatus, '请填写 API 设置并保存，再返回答题。', 'warn');
@@ -1632,10 +1652,8 @@
         }
 
         setBusy(true);
-        lastQ = null;
-        lastA = '';
-        ui.btnFill.disabled = true;
-        setAnswer('正在提取题目…', true);
+        resetAnswer();
+        setAnswer('正在读取题目…', true);
         setStatus('正在提取题目…');
 
         try {
@@ -1653,7 +1671,7 @@
             autoAttempts.add(questionKey);
             showPreview(q);
             setStatus((automatic ? '自动答题：正在请求 ' : '已识别题目，正在请求 ') + config.model + ' …');
-            setAnswer('请求中…', true);
+            setAnswer('等待模型返回答案…', true);
 
             const answer = await getAnswer(q, config, !automatic);
             if (location.href !== requestUrl) return;
@@ -1677,7 +1695,8 @@
                 if (location.href !== requestUrl) return false;
                 if (!automatic) return true;
                 const active = getApiConfig();
-                return canRunAutomatically() && active.base === config.base && active.key === config.key && active.model === config.model;
+                return epoch === autoRunEpoch && canRunAutomatically() &&
+                    active.base === config.base && active.key === config.key && active.model === config.model;
             };
             const fresh = automatic && canContinue() ? bestFromDOM() : null;
             const canFill = automatic
@@ -1689,9 +1708,10 @@
                 try { r = await applyAnswer(q, answer, canContinue); } catch (e) { r = null; }
                 if (location.href === requestUrl) setStatus(fillMessage(r), r && r.filled > 0 && !r.note ? 'ok' : 'warn');
             } else if (automatic) {
-                setStatus('答案已返回，页面或作答状态有变化，请核对后手动填入', 'warn');
+                setStatus(epoch !== autoRunEpoch ? '已暂停自动填入。答案已保留，可手动填入。' :
+                    '页面或作答状态有变化，请核对后手动填入。', 'warn');
             } else {
-                setStatus('完成（' + new Date().toLocaleTimeString() + '）', 'ok');
+                setStatus('答案已就绪。', 'ok');
             }
         } catch (err) {
             if (location.href === requestUrl) {
@@ -1714,9 +1734,14 @@
     let autoCandidate = null;
     let autoObserver = null;
 
+    function isCoursePage() {
+        return /\/courseware\//.test(location.pathname + location.hash);
+    }
+
     function canRunAutomatically() {
-        return ui.settings.hidden && document.visibilityState === 'visible' &&
-            getApiConfig().autoRun === true && /\/courseware\//.test(location.pathname + location.hash);
+        if (!ui.settings.hidden || document.visibilityState !== 'visible' || !isCoursePage()) return false;
+        const config = getApiConfig();
+        return config.autoRun === true && apiReady(config);
     }
 
     function autoQuestionKey(q) {
@@ -1755,8 +1780,6 @@
         autoTimer = setTimeout(() => {
             autoTimer = null;
             if (busy || filling || !canRunAutomatically()) return;
-            const config = getApiConfig();
-            if (!config.model) return;
             const q = bestFromDOM();
             if (!q || (q.score !== 100 && !q.autoRecognized) || !isUntouched(q)) {
                 autoCandidate = null;
@@ -1791,8 +1814,55 @@
         scheduleAuto();
     }
 
-    window.addEventListener('hashchange', updateAutoWatch);
-    window.addEventListener('popstate', updateAutoWatch);
+    function showReadyStatus(config = getApiConfig()) {
+        if (!apiReady(config)) {
+            setStatus('请先在 API 设置中保存地址和模型。', 'warn');
+        } else if (config.autoRun && !isCoursePage()) {
+            setStatus('自动答题已开启。进入课程题目页后开始。');
+        } else if (config.autoRun) {
+            setStatus('等待识别题目…');
+        } else {
+            setStatus('等待获取答案');
+        }
+    }
+
+    function changeMode() {
+        const config = getApiConfig();
+        const active = ui.autoRun.checked;
+        if (active && !apiReady(config)) {
+            syncMode(config);
+            showSettings();
+            fieldStatus(ui.settingsStatus, '保存 API 地址和模型后，返回主页开启自动答题。', 'warn');
+            return;
+        }
+        try {
+            if (typeof GM_setValue !== 'function') throw new Error('storage');
+            GM_setValue(CFG.API_STORE, { base: config.base, key: config.key, model: config.model, autoRun: active });
+        } catch (e) {
+            syncMode(config);
+            setStatus('保存开关失败，请检查 Tampermonkey。', 'err');
+            return;
+        }
+        autoRunEpoch++;
+        syncMode();
+        updateAutoWatch();
+        if (!busy && !filling) showReadyStatus();
+        else if (!active) setStatus('自动答题已关闭，进行中的请求返回后会保留答案。');
+    }
+    ui.manualRun.addEventListener('change', changeMode);
+    ui.autoRun.addEventListener('change', changeMode);
+
+    let currentPage = location.href;
+    function coursePageChanged() {
+        if (currentPage === location.href) return;
+        currentPage = location.href;
+        autoRunEpoch++;
+        resetAnswer();
+        showReadyStatus();
+        updateAutoWatch();
+    }
+    window.addEventListener('hashchange', coursePageChanged);
+    window.addEventListener('popstate', coursePageChanged);
     document.addEventListener('visibilitychange', updateAutoWatch);
     window.addEventListener('scroll', scheduleAuto, { capture: true, passive: true });
     updateAutoWatch();
@@ -1807,10 +1877,6 @@
         else if (k === 'f') { e.preventDefault(); doFill(); }
     });
 
-    const initialConfig = getApiConfig();
-    if (!initialConfig.model || (!initialConfig.saved && !initialConfig.key)) {
-        setStatus('首次使用，请先打开 API 设置。', 'warn');
-    } else {
-        setStatus('就绪 · Alt+Q 取答案');
-    }
+    syncMode();
+    showReadyStatus();
 })();
