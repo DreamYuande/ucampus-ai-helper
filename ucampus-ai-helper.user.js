@@ -2,7 +2,7 @@
 // @name         U校园 AI 答题助手（半自动 · 优化版）
 // @name:zh-CN   U校园 AI 答题助手
 // @namespace    https://tampermonkey.net/
-// @version      2.4.1
+// @version      2.4.2
 // @description  U校园网页答题助手，支持自定义 OpenAI 兼容 API、模型选择和手动或自动填入；答案由用户核对并提交。
 // @author       DreamYuande
 // @copyright    2026 DreamYuande
@@ -42,7 +42,6 @@
         KEY_STORE: 'uc_ai_api_key',
         MODEL_STORE: 'uc_ai_model',
         POS_STORE: 'uc_ai_panel_pos_rb',
-        AUTOFILL_STORE: 'uc_ai_autofill',
     };
 
     const IS_TOP = (() => {
@@ -373,132 +372,131 @@
         return null;
     }
 
-    function bestFromDOM() {
+    function bestFromDOM(requireRecognized = false) {
         const structuredQuestion = readMatchingQuestion() || readSplitWritingQuestion() || readRewriteQuestion();
         if (structuredQuestion) return structuredQuestion;
 
         const cands = collectCandidates().map((c) => {
             const info = analyze(c.el, c.text);
             info.score = scoreCandidate(c) + (info.type !== 'translate' ? 0.5 : 0);
-            info.el = c.el;          // 保留 DOM 引用，供自动填入使用
-            info.autoRecognized = c.weight >= 1 && ['single', 'multiple', 'blank'].includes(info.type);
+            info.el = c.el;
+            info.autoRecognized = c.weight >= 1 || !!c.el.querySelector('textarea,input[type=text],input[type=radio],[contenteditable="true"]');
             return info;
-        });
+        }).filter((q) => !requireRecognized || q.autoRecognized);
         cands.sort((a, b) => b.score - a.score);
-        return cands.length ? cands[0] : null;
+        return cands[0] || null;
     }
 
     /* =====================================================================
      * 4. 跨 iframe 取题（U校园题目常嵌在 iframe 里）
      * =================================================================== */
-    // DOM 元素不能 postMessage，跨窗口只传纯数据
+    const touchedCards = new WeakSet();
+    document.addEventListener('dragstart', (e) => {
+        if (!e.isTrusted) return;
+        const table = e.target.closest?.(MATCH_TABLE);
+        if (table) touchedCards.add(table);
+    }, true);
+
+    function isUntouched(q) {
+        if (!q.el?.isConnected) return false;
+        if (q.type === 'match') {
+            return !touchedCards.has(q.el) && q.matchRows?.every((row) => row.card?.draggable);
+        }
+        const choice = q.type === 'single' || q.type === 'multiple';
+        const selector = choice ? 'input[type=radio],input[type=checkbox]' :
+            q.type === 'rewrite' ? 'textarea.scoopFill_textarea' :
+            'input[type=text],input:not([type]),textarea,[contenteditable="true"]';
+        const controls = $all(selector, q.el).filter((el) => isVisible(el) || (choice && isVisible(el.closest('label'))));
+        if (choice && (controls.length !== q.options.length || controls.length < 2)) return false;
+        if (q.type === 'blank' && controls.length !== q.blanks) return false;
+        return controls.length > 0 && controls.every((el) =>
+            !el.disabled && !el.readOnly && document.activeElement !== el &&
+            (choice ? !el.checked : !cleanText(el.isContentEditable ? el.innerText : el.value))
+        );
+    }
+
+    function questionIdentity(q) {
+        return q.matchRows ? JSON.stringify([q.matchRows.map((r) => r.left), q.matchRows.map((r) => r.right).sort()]) : q.text;
+    }
+
+    function sameQuestion(a, b) {
+        return !!a && !!b && a.type === b.type && a.text === b.text && a._frame === b._frame && a._origin === b._origin;
+    }
+
+    function isCourseOrigin(origin) {
+        try {
+            const u = new URL(origin);
+            return /^https?:$/.test(u.protocol) && /(?:^|\.)unipus\.cn$/.test(u.hostname);
+        } catch (e) { return false; }
+    }
+
     function packQuestion(info) {
         if (!info) return null;
         return {
-            text: info.text,
-            type: info.type,
-            options: info.options,
-            blanks: info.blanks,
-            checked: info.checked,
-            score: info.score,
+            text: info.text, type: info.type, options: info.options, blanks: info.blanks,
+            checked: info.checked, score: info.score, identity: questionIdentity(info), untouched: isUntouched(info),
         };
     }
 
     function installFrameAgent() {
-        // 记录本帧最近一次被问到的题目，填入时复用，避免中途滚动导致错题
-        let lastTarget = null;
-
         window.addEventListener('message', async (ev) => {
             const d = ev.data;
-            if (!d || !d.__ucAI) return;
-
-            // 孙级 iframe 的结果向上转发，保证顶层能收到任意深度的回复
-            if (d.__ucAI === 'reply' || d.__ucAI === 'filled') {
-                try { if (window.parent && window.parent !== window) window.parent.postMessage(d, '*'); } catch (e) { /* 忽略 */ }
-                return;
-            }
-
-            if (ev.source !== window.parent) return;
+            if (!d || ev.source !== window.parent || !isCourseOrigin(ev.origin)) return;
 
             if (d.__ucAI === 'ask') {
-                let best = null;
-                try { best = bestFromDOM(); } catch (e) { best = null; }
-                if (best) lastTarget = { info: best, el: best.el, at: Date.now() };
+                const best = bestFromDOM(d.recognized === true);
+                ev.source.postMessage({ __ucAI: 'reply', id: d.id, question: packQuestion(best) }, ev.origin);
+            } else if (d.__ucAI === 'fill') {
+                let result;
                 try {
-                    if (ev.source) {
-                        ev.source.postMessage({ __ucAI: 'reply', id: d.id, question: packQuestion(best) }, '*');
-                    }
-                } catch (e) { /* 忽略 */ }
-                return;
-            }
-
-            if (d.__ucAI === 'fill') {
-                let res = null;
-                try {
-                    let target = (lastTarget && Date.now() - lastTarget.at < 60000) ? lastTarget : null;
-                    if (!target || !target.el) {
-                        const fresh = bestFromDOM();
-                        if (fresh) target = { info: fresh, el: fresh.el, at: Date.now() };
-                    }
-                    res = target ? await fillAnswer(target.info, target.el, d.answer) : { filled: 0, total: 0, note: '找不到题目' };
+                    const current = bestFromDOM(d.untouched === true);
+                    result = sameQuestion(current, d.expected) && (!d.untouched || isUntouched(current))
+                        ? await fillAnswer(current, current.el, d.answer)
+                        : { filled: 0, total: d.expected?.blanks || 1, note: '题目或作答状态有变化，请核对后重新取题' };
                 } catch (e) {
-                    res = { filled: 0, total: 0, note: '填入时出错' };
+                    result = { filled: 0, total: d.expected?.blanks || 1, note: '填入时出错' };
                 }
-                try {
-                    if (ev.source) ev.source.postMessage({ __ucAI: 'filled', id: d.id, result: res }, '*');
-                } catch (e) { /* 忽略 */ }
+                ev.source.postMessage({ __ucAI: 'filled', id: d.id, result }, ev.origin);
             }
-        }, false);
+        });
     }
 
-    function askFrames(timeoutMs) {
-        const frames = $all('iframe,frame');
+    function askFrames(timeoutMs, recognized) {
+        const frames = $all('iframe,frame').filter((f) => isVisible(f) && inViewport(f));
         if (!frames.length) return Promise.resolve([]);
 
         return new Promise((resolve) => {
             const id = 'q' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
             const found = [];
-
             const onMsg = (ev) => {
                 const d = ev.data;
-                if (!d || d.__ucAI !== 'reply' || d.id !== id || !d.question) return;
-                // 记下题目来自哪个 iframe，后面把答案填回去
-                let srcFrame = null;
-                try {
-                    srcFrame = frames.find((f) => {
-                        try { return f.contentWindow === ev.source; } catch (e) { return false; }
-                    }) || null;
-                } catch (e) { srcFrame = null; }
-                d.question._frame = srcFrame;
-                found.push(d.question);
+                if (!d || d.__ucAI !== 'reply' || d.id !== id || typeof d.question?.text !== 'string' || !isCourseOrigin(ev.origin)) return;
+                const frame = frames.find((f) => f.contentWindow === ev.source);
+                if (frame) found.push({ ...d.question, _frame: frame, _origin: ev.origin });
             };
-            window.addEventListener('message', onMsg, false);
-
+            window.addEventListener('message', onMsg);
             frames.forEach((f) => {
-                try { f.contentWindow.postMessage({ __ucAI: 'ask', id: id }, '*'); } catch (e) { /* 忽略 */ }
+                try { f.contentWindow.postMessage({ __ucAI: 'ask', id, recognized }, '*'); } catch (e) { /* iframe 已关闭 */ }
             });
-
             setTimeout(() => {
-                window.removeEventListener('message', onMsg, false);
+                window.removeEventListener('message', onMsg);
                 resolve(found);
             }, timeoutMs);
         });
     }
 
-    async function extractQuestion() {
-        const local = bestFromDOM();
-        // 本帧已经拿到可靠的题目时，不必再等 iframe（省掉 500ms 延迟）
-        if (local && local.score >= 3) return local;
-
-        const remote = await askFrames(CFG.frameWaitMs);
+    async function extractQuestion(recognized = false) {
+        const local = bestFromDOM(recognized);
+        if (local?.score === 100 && !local.autoRecognized) return local;
+        const remote = await askFrames(CFG.frameWaitMs, recognized);
         const all = (local ? [local] : []).concat(remote);
-        if (!all.length) return null;
         all.sort((a, b) => (b.score || 0) - (a.score || 0));
-        return all[0];
+        return all[0] || null;
     }
 
     /* ---- 把答案填回去：可能在本帧，也可能在 iframe 里 ---- */
-    function fillInFrame(frameEl, answer, timeoutMs) {
+    function fillInFrame(q, answer, untouchedOnly, timeoutMs) {
+        const frameEl = q._frame;
         return new Promise((resolve) => {
             const id = 'f' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
             let timer = null;
@@ -509,7 +507,7 @@
             };
             const onMsg = (ev) => {
                 const d = ev.data;
-                if (!d || d.__ucAI !== 'filled' || d.id !== id) return;
+                if (!d || d.__ucAI !== 'filled' || d.id !== id || ev.source !== frameEl.contentWindow || ev.origin !== q._origin) return;
                 cleanup();
                 resolve(d.result || null);
             };
@@ -518,7 +516,7 @@
             timer = setTimeout(() => { cleanup(); resolve(null); }, timeoutMs || 3000);
 
             try {
-                frameEl.contentWindow.postMessage({ __ucAI: 'fill', id: id, answer: answer }, '*');
+                frameEl.contentWindow.postMessage({ __ucAI: 'fill', id, answer, untouched: untouchedOnly, expected: { type: q.type, text: q.text, blanks: q.blanks } }, q._origin);
             } catch (e) {
                 cleanup();
                 resolve(null);
@@ -526,12 +524,12 @@
         });
     }
 
-    async function applyAnswer(q, answer, canContinue = () => true) {
+    async function applyAnswer(q, answer, canContinue = () => true, untouchedOnly = false) {
         const empty = { filled: 0, total: 0, note: '没有可填写的题目' };
-        if (!q) return empty;
+        if (!q || !canContinue()) return empty;
 
         if (q._frame) {
-            const r = await fillInFrame(q._frame, answer, 3000);
+            const r = await fillInFrame(q, answer, untouchedOnly, 3000);
             return r || { filled: 0, total: 0, note: 'iframe 内填入超时' };
         }
 
@@ -610,7 +608,7 @@
         if (typeof GM_getValue === 'function') {
             const saved = GM_getValue(CFG.API_STORE, null);
             if (saved && typeof saved.base === 'string') {
-                return { base: saved.base, key: String(saved.key || ''), model: String(saved.model || ''), saved: true, autoRun: saved.autoRun === true };
+                return { base: saved.base, key: String(saved.key || ''), model: String(saved.model || ''), saved: true };
             }
             return {
                 base: CFG.defaultBase,
@@ -704,16 +702,16 @@
         }
     }
 
-    async function getAnswer(q, config, allowRetry = true) {
+    async function getAnswer(q, config, manual = false) {
         if (!cacheConfig || cacheConfig.base !== config.base || cacheConfig.key !== config.key || cacheConfig.model !== config.model) {
             cache.clear();
             cacheConfig = config;
         }
         const payload = { model: config.model, messages: buildMessages(q), stream: false };
         const cacheKey = JSON.stringify(payload.messages);
-        if (cache.has(cacheKey)) return cache.get(cacheKey);
+        if (!manual && cache.has(cacheKey)) return cache.get(cacheKey);
 
-        const answer = await (allowRetry ? askWithRetry(config, payload) : requestAnswer(config, payload));
+        const answer = await (manual ? askWithRetry(config, payload) : requestAnswer(config, payload));
         if (answer) cache.set(cacheKey, answer);
         if (cache.size > CFG.cacheLimit) cache.delete(cache.keys().next().value);
         return answer;
@@ -1073,13 +1071,6 @@
         .model-field { border-top: 1px solid var(--line); padding-top: 8px; }
         .chk { display: flex; gap: 6px; align-items: center; min-height: 30px; cursor: pointer; color: var(--muted); }
         .chk input { margin: 0; accent-color: var(--accent); }
-        .mode-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; background: var(--paper); padding: 3px; border-radius: 9px; }
-        .mode { display: grid; position: relative; min-width: 0; text-align: center; cursor: pointer; }
-        .mode input { position: absolute; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
-        .mode span { display: grid; place-items: center; min-height: 32px; padding: 4px; color: var(--muted); border-radius: 6px; }
-        .mode:hover span { background: #e6e9f2; }
-        .mode input:checked + span { color: var(--accent); background: var(--white); font-weight: 650; box-shadow: 0 1px 4px rgb(28 37 58 / .10); }
-        .mode input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: -2px; }
         .advice, .tip, .model-tag, details, .foot { color: var(--muted); overflow-wrap: anywhere; }
         .advice strong { color: #a43c29; font-weight: 650; }
         .model-tag { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1117,9 +1108,8 @@
         .foot a:hover { text-decoration: underline; }
         .foot svg { width: 16px; height: 16px; fill: currentColor; }
         .ball { width: 42px; height: 42px; padding: 0; border-radius: 50%; font-size: 14px; font-weight: 650; box-shadow: 0 4px 16px rgb(28 37 58 / .20); }
-        .ball[data-auto="on"] { box-shadow: 0 0 0 2px var(--white), 0 0 0 4px var(--accent), 0 4px 16px rgb(28 37 58 / .20); }
         @media (max-width: 340px) { .panel, .ball { right: max(12px, env(safe-area-inset-right)); bottom: max(12px, env(safe-area-inset-bottom)); } }
-        @media (pointer: coarse) { button, button.x, .mode span, input:not([type=checkbox]):not([type=radio]), select, .foot a { min-height: 44px; } button.x, .ball { min-width: 44px; } }
+        @media (pointer: coarse) { button, button.x, input:not([type=checkbox]):not([type=radio]), select, .foot a { min-height: 44px; } button.x, .ball { min-width: 44px; } }
         @media (prefers-reduced-motion: reduce) { button { transition: none; } button:active:not(:disabled) { transform: none; } }
     `;
 
@@ -1128,15 +1118,11 @@
             <div class="hd" id="hd">
                 <div class="heading">
                     <h2 class="t" id="panel-title" tabindex="-1">U校园 AI 答题助手</h2>
-                    <div class="version">v2.4.1</div>
+                    <div class="version">v2.4.2</div>
                 </div>
-                <button class="x" id="btn-min" title="收起（Alt+M）" aria-label="收起为悬浮球" type="button">−</button>
+                <button class="x" id="btn-min" title="收起" aria-label="收起为悬浮球" type="button">−</button>
             </div>
             <div class="bd" id="bd">
-                <div class="mode-tabs" role="radiogroup" aria-label="答题模式">
-                    <label class="mode"><input id="manual-run" type="radio" name="answer-mode" checked><span>手动模式</span></label>
-                    <label class="mode"><input id="auto-run" type="radio" name="answer-mode" title="进页自动读题并填入"><span>自动模式</span></label>
-                </div>
                 <div class="advice"><strong>AI 答案仅供参考</strong> · 核对后手动提交</div>
                 <div class="row">
                     <span class="model-tag" id="active-model"></span>
@@ -1145,11 +1131,10 @@
                 <div class="st" id="st" role="status"></div>
                 <div class="ans empty" id="ans" tabindex="0" aria-label="模型答案">答案显示在这里</div>
                 <div class="row actions">
-                    <button class="primary" id="btn-ask" type="button" title="Alt+Q">获取答案</button>
+                    <button class="primary" id="btn-ask" type="button">重新搜题</button>
                     <button class="ghost" id="btn-copy" type="button" disabled>复制</button>
-                    <button class="ghost" id="btn-fill" type="button" disabled title="Alt+F">填入</button>
+                    <button class="ghost" id="btn-fill" type="button" disabled>填入</button>
                 </div>
-                <label class="chk" id="manual-fill-pref"><input type="checkbox" id="autofill">手动取答后直接填入</label>
                 <details id="preview" hidden>
                     <summary>查看题目原文</summary>
                     <pre id="preview-pre"></pre>
@@ -1230,11 +1215,7 @@
         btnAsk: byId(shadow, 'btn-ask'),
         btnCopy: byId(shadow, 'btn-copy'),
         btnFill: byId(shadow, 'btn-fill'),
-        autofill: byId(shadow, 'autofill'),
-        manualRun: byId(shadow, 'manual-run'),
-        autoRun: byId(shadow, 'auto-run'),
         activeModel: byId(shadow, 'active-model'),
-        manualFillPref: byId(shadow, 'manual-fill-pref'),
         btnMin: byId(shadow, 'btn-min'),
     };
 
@@ -1257,13 +1238,7 @@
 
     const apiReady = (config) => !!config.model && (config.saved || !!config.key);
 
-    function syncMode(config = getApiConfig()) {
-        const active = config.autoRun === true;
-        ui.manualRun.checked = !active;
-        ui.autoRun.checked = active;
-        ui.ball.dataset.auto = active ? 'on' : 'off';
-        ui.ball.setAttribute('aria-label', '展开答题助手，自动答题' + (active ? '已开启' : '已关闭'));
-        ui.manualFillPref.hidden = active;
+    function syncConfig(config = getApiConfig()) {
         const model = apiReady(config) ? '模型：' + config.model : '未配置 API';
         ui.activeModel.textContent = model;
         ui.activeModel.title = model;
@@ -1298,7 +1273,7 @@
     function setBusy(on) {
         busy = on;
         ui.btnAsk.disabled = on;
-        ui.btnAsk.textContent = on ? '处理中…' : '获取答案';
+        ui.btnAsk.textContent = on ? '处理中…' : '重新搜题';
     }
 
     /* ---------- 浮窗位置 ---------- */
@@ -1494,7 +1469,7 @@
         ui.bd.hidden = false;
         ui.btnSettings.hidden = false;
         ui.title.textContent = 'U校园 AI 答题助手';
-        syncMode();
+        syncConfig();
         ui.btnSettings.focus({ preventScroll: true });
         keepOnScreen();
         updateAutoWatch();
@@ -1542,7 +1517,7 @@
             ui.base.focus();
             return;
         }
-        const config = { base, key: keyForBase(base), model: ui.model.value.trim(), autoRun: getApiConfig().autoRun === true };
+        const config = { base, key: keyForBase(base), model: ui.model.value.trim() };
         try {
             if (typeof GM_setValue !== 'function') throw new Error('storage');
             GM_setValue(CFG.API_STORE, config);
@@ -1556,15 +1531,16 @@
         ui.clearKey.checked = false;
         draftBase = base;
         updateKeyHint();
-        fieldStatus(ui.settingsStatus, config.model ? '设置已保存。' : 'API 已保存，请选择或填写模型 ID 后再保存。', config.model ? 'ok' : 'warn');
-        if (!busy) setStatus(config.model ? '就绪 · Alt+Q 取答案' : '请在 API 设置中选择模型', config.model ? '' : 'warn');
-        void refreshModels();
+        if (config.model) {
+            autoAttempts.clear();
+            resetAnswer();
+            showReadyStatus();
+            showHome();
+        } else {
+            fieldStatus(ui.settingsStatus, '请选择或填写模型 ID 后再保存。', 'warn');
+            ui.model.focus();
+        }
     });
-
-    // 与原版一致，记住自动填入偏好；不会点击提交。
-    ui.autofill.checked = store.get(CFG.AUTOFILL_STORE, true) !== false;
-    ui.autofill.addEventListener('change', () => store.set(CFG.AUTOFILL_STORE, ui.autofill.checked));
-    const autoFillOn = () => ui.autofill.checked || ui.autoRun.checked;
 
     /* ---------- 复制 ---------- */
     async function copyAnswer() {
@@ -1656,6 +1632,7 @@
         setAnswer('正在读取题目…', true);
         setStatus('正在提取题目…');
 
+        let requestedKey = '';
         try {
             const q = automaticQuestion || await extractQuestion();
             if (!q || !q.text || q.text.length < 8) {
@@ -1665,61 +1642,58 @@
                 return;
             }
 
-            if (location.href !== requestUrl) return;
+            const currentConfig = () => {
+                const active = getApiConfig();
+                return epoch === autoRunEpoch && location.href === requestUrl && ui.settings.hidden &&
+                    active.base === config.base && active.key === config.key && active.model === config.model;
+            };
+            if (!currentConfig()) return;
             const questionKey = autoQuestionKey(q);
             if (automatic && (!canRunAutomatically() || autoAttempts.has(questionKey))) return;
             autoAttempts.add(questionKey);
+            requestedKey = questionKey;
             showPreview(q);
-            setStatus((automatic ? '自动答题：正在请求 ' : '已识别题目，正在请求 ') + config.model + ' …');
+            setStatus('正在请求 ' + config.model + '…');
             setAnswer('等待模型返回答案…', true);
 
             const answer = await getAnswer(q, config, !automatic);
-            if (location.href !== requestUrl) return;
-            if (!answer) {
-                setAnswer('模型没有返回内容，请重试', true);
-                setStatus('返回为空', 'warn');
+            if (!currentConfig()) return;
+            const fresh = await extractQuestion(automatic);
+            if (!currentConfig()) return;
+            if (!sameQuestion(q, fresh)) {
+                setAnswer('题目有变化，正在重新识别。', true);
+                setStatus('等待识别当前题目…');
                 return;
             }
-            if (/^信息不足[。.]?$/.test(answer)) {
-                setAnswer('题目信息不足，请核对识别内容后重试', true);
-                setStatus('请展开下方的题目预览。', 'warn');
+            if (!answer || /^信息不足[。.]?$/.test(answer)) {
+                setAnswer(answer ? '题目信息不足，请核对题目原文。' : '模型未返回答案。', true);
+                setStatus('核对题目后，可点击「重新搜题」。', 'warn');
                 return;
             }
+
             setAnswer(answer, false);
-            lastQ = q;
+            lastQ = fresh;
             lastA = answer;
             lastAnswerUrl = requestUrl;
             ui.btnFill.disabled = false;
 
-            const canContinue = () => {
-                if (location.href !== requestUrl) return false;
-                if (!automatic) return true;
-                const active = getApiConfig();
-                return epoch === autoRunEpoch && canRunAutomatically() &&
-                    active.base === config.base && active.key === config.key && active.model === config.model;
-            };
-            const fresh = automatic && canContinue() ? bestFromDOM() : null;
-            const canFill = automatic
-                ? fresh?.el === q.el && fresh.text === q.text && isUntouched(fresh)
-                : autoFillOn();
-            if (canFill && canContinue()) {
+            const canContinue = () => currentConfig() && document.visibilityState === 'visible';
+            if (canContinue() && (fresh._frame ? fresh.untouched : isUntouched(fresh))) {
                 setStatus('答案已返回，正在填入…');
                 let r = null;
-                try { r = await applyAnswer(q, answer, canContinue); } catch (e) { r = null; }
-                if (location.href === requestUrl) setStatus(fillMessage(r), r && r.filled > 0 && !r.note ? 'ok' : 'warn');
-            } else if (automatic) {
-                setStatus(epoch !== autoRunEpoch ? '已暂停自动填入。答案已保留，可手动填入。' :
-                    '页面或作答状态有变化，请核对后手动填入。', 'warn');
+                try { r = await applyAnswer(fresh, answer, canContinue, true); } catch (e) { r = null; }
+                if (currentConfig()) setStatus(fillMessage(r), r?.filled > 0 && !r.note ? 'ok' : 'warn');
             } else {
-                setStatus('答案已就绪。', 'ok');
+                setStatus('答案已就绪，原作答未改动。', 'ok');
             }
         } catch (err) {
-            if (location.href === requestUrl) {
+            if (epoch === autoRunEpoch && location.href === requestUrl && ui.settings.hidden) {
                 const msg = (err && err.message) ? err.message : String(err);
                 setAnswer(msg, true);
-                setStatus(msg, 'err');
+                setStatus('请求失败，可点击「重新搜题」。', 'err');
             }
         } finally {
+            if (requestedKey && epoch !== autoRunEpoch && location.href === requestUrl) autoAttempts.delete(requestedKey);
             setBusy(false);
             scheduleAuto();
         }
@@ -1727,89 +1701,80 @@
 
     ui.btnAsk.addEventListener('click', () => void onAsk());
 
-    /* ---------- 页面自动答题 ---------- */
+    /* ---------- 页面自动取题 ---------- */
     const autoAttempts = new Set();
-    const touchedCards = new WeakSet();
     let autoTimer = null;
     let autoCandidate = null;
-    let autoObserver = null;
+    let autoScanning = false;
+    let retryUntil = 0;
 
     function isCoursePage() {
-        return /\/courseware\//.test(location.pathname + location.hash);
+        return /\/courseware(?:\/|$)/.test(location.pathname + location.hash) ||
+            (location.hostname === 'ucontent.unipus.cn' && /\/(?:pc|index)\.html$/.test(location.pathname));
     }
 
     function canRunAutomatically() {
-        if (!ui.settings.hidden || document.visibilityState !== 'visible' || !isCoursePage()) return false;
-        const config = getApiConfig();
-        return config.autoRun === true && apiReady(config);
+        return ui.settings.hidden && document.visibilityState === 'visible' && isCoursePage() && apiReady(getApiConfig());
     }
 
     function autoQuestionKey(q) {
-        const content = q.type === 'match' && q.matchRows
-            ? [q.matchRows.map((r) => r.left), q.matchRows.map((r) => r.right).sort()]
-            : q.text;
-        return JSON.stringify([location.href, q.type, content]);
+        return JSON.stringify([location.href, q._frame?.getAttribute('src') || '', q.type, q.identity || questionIdentity(q)]);
     }
-
-    function isUntouched(q) {
-        if (!q.el?.isConnected) return false;
-        if (q.type === 'match') {
-            return !touchedCards.has(q.el) && q.matchRows?.every((row) => row.card?.draggable);
-        }
-        const selector = q.type === 'rewrite' ? 'textarea.scoopFill_textarea' :
-            q.type === 'translate' ? 'textarea' :
-            q.type === 'blank' ? 'input[type=text],input:not([type]),textarea' : 'input[type=radio],input[type=checkbox]';
-        const controls = $all(selector, q.el).filter(isVisible);
-        const choice = q.type === 'single' || q.type === 'multiple';
-        if (choice && (controls.length !== q.options.length || controls.length < 2)) return false;
-        if (q.type === 'blank' && controls.length !== q.blanks) return false;
-        return controls.length > 0 && controls.every((el) =>
-            !el.disabled && !el.readOnly && document.activeElement !== el &&
-            (choice ? !el.checked : !el.value.trim())
-        );
-    }
-
-    document.addEventListener('dragstart', (e) => {
-        if (!e.isTrusted) return;
-        const table = e.target.closest?.(MATCH_TABLE);
-        if (table) touchedCards.add(table);
-    }, true);
 
     function scheduleAuto() {
-        if (autoTimer !== null || busy || filling || !canRunAutomatically()) return;
-        autoTimer = setTimeout(() => {
-            autoTimer = null;
-            if (busy || filling || !canRunAutomatically()) return;
-            const q = bestFromDOM();
-            if (!q || (q.score !== 100 && !q.autoRecognized) || !isUntouched(q)) {
+        if (autoTimer !== null || autoScanning || busy || filling || !canRunAutomatically()) return;
+        autoTimer = setTimeout(scanAuto, 420);
+    }
+
+    async function scanAuto() {
+        autoTimer = null;
+        if (busy || filling || !canRunAutomatically()) return;
+        const epoch = autoRunEpoch;
+        const url = location.href;
+        let chosen = null;
+        let retry = false;
+        autoScanning = true;
+        try {
+            const q = await extractQuestion(true);
+            if (epoch !== autoRunEpoch || url !== location.href || !canRunAutomatically() || busy || filling) return;
+            if (!q) {
                 autoCandidate = null;
+                retry = Date.now() < retryUntil;
+                if (!retry && !lastA) setStatus('暂未识别到题目，可点击「重新搜题」。', 'warn');
                 return;
             }
             const key = autoQuestionKey(q);
             if (autoAttempts.has(key)) return;
-            if (autoCandidate?.key !== key || autoCandidate.el !== q.el || autoCandidate.text !== q.text) {
-                autoCandidate = { key, el: q.el, text: q.text };
-                scheduleAuto();
+            if (!autoCandidate || autoCandidate.key !== key || !sameQuestion(q, autoCandidate.q)) {
+                autoCandidate = { key, q };
+                retry = true;
                 return;
             }
             autoCandidate = null;
-            void onAsk(q);
-        }, 450);
+            chosen = q;
+        } catch (e) {
+            retry = Date.now() < retryUntil;
+        } finally {
+            autoScanning = false;
+            if (chosen) void onAsk(chosen);
+            else if (retry || epoch !== autoRunEpoch || url !== location.href) scheduleAuto();
+        }
     }
+
+    const autoObserver = new MutationObserver(() => {
+        if (!coursePageChanged()) scheduleAuto();
+    });
 
     function updateAutoWatch() {
         clearTimeout(autoTimer);
         autoTimer = null;
         autoCandidate = null;
-        if (autoObserver) {
-            autoObserver.disconnect();
-            autoObserver = null;
-        }
+        autoObserver.disconnect();
         if (!canRunAutomatically()) return;
-        autoObserver = new MutationObserver(scheduleAuto);
+        retryUntil = Date.now() + 9000;
         autoObserver.observe(document.body, {
             subtree: true, childList: true, characterData: true, attributes: true,
-            attributeFilter: ['class', 'hidden', 'aria-hidden', 'disabled', 'readonly', 'draggable'],
+            attributeFilter: ['class', 'style', 'src', 'hidden', 'aria-hidden', 'disabled', 'readonly', 'draggable'],
         });
         scheduleAuto();
     }
@@ -1817,66 +1782,32 @@
     function showReadyStatus(config = getApiConfig()) {
         if (!apiReady(config)) {
             setStatus('请先在 API 设置中保存地址和模型。', 'warn');
-        } else if (config.autoRun && !isCoursePage()) {
-            setStatus('自动答题已开启。进入课程题目页后开始。');
-        } else if (config.autoRun) {
+        } else if (isCoursePage()) {
             setStatus('等待识别题目…');
         } else {
-            setStatus('等待获取答案');
+            setStatus('等待进入课程题目页');
         }
     }
-
-    function changeMode() {
-        const config = getApiConfig();
-        const active = ui.autoRun.checked;
-        if (active && !apiReady(config)) {
-            syncMode(config);
-            showSettings();
-            fieldStatus(ui.settingsStatus, '保存 API 地址和模型后，返回主页开启自动答题。', 'warn');
-            return;
-        }
-        try {
-            if (typeof GM_setValue !== 'function') throw new Error('storage');
-            GM_setValue(CFG.API_STORE, { base: config.base, key: config.key, model: config.model, autoRun: active });
-        } catch (e) {
-            syncMode(config);
-            setStatus('保存开关失败，请检查 Tampermonkey。', 'err');
-            return;
-        }
-        autoRunEpoch++;
-        syncMode();
-        updateAutoWatch();
-        if (!busy && !filling) showReadyStatus();
-        else if (!active) setStatus('自动答题已关闭，进行中的请求返回后会保留答案。');
-    }
-    ui.manualRun.addEventListener('change', changeMode);
-    ui.autoRun.addEventListener('change', changeMode);
 
     let currentPage = location.href;
     function coursePageChanged() {
-        if (currentPage === location.href) return;
+        if (currentPage === location.href) return false;
         currentPage = location.href;
         autoRunEpoch++;
         resetAnswer();
         showReadyStatus();
         updateAutoWatch();
+        return true;
     }
     window.addEventListener('hashchange', coursePageChanged);
     window.addEventListener('popstate', coursePageChanged);
-    document.addEventListener('visibilitychange', updateAutoWatch);
+    document.addEventListener('visibilitychange', () => { if (!coursePageChanged()) updateAutoWatch(); });
     window.addEventListener('scroll', scheduleAuto, { capture: true, passive: true });
+    document.addEventListener('load', (e) => {
+        if (e.target.matches?.('iframe,frame')) scheduleAuto();
+    }, true);
     updateAutoWatch();
 
-    /* ---------- 快捷键：Alt+Q 取答案，Alt+F 填入，Alt+M 收起/展开 ---------- */
-    window.addEventListener('keydown', (e) => {
-        if (!e.altKey || e.ctrlKey || e.metaKey || e.repeat) return;
-        const k = (e.key || '').toLowerCase();
-        if (k === 'm') { e.preventDefault(); ui.panel.hidden ? expand() : minimize(); return; }
-        if (!ui.settings.hidden) return;
-        if (k === 'q') { e.preventDefault(); if (ui.panel.hidden) expand(); onAsk(); }
-        else if (k === 'f') { e.preventDefault(); doFill(); }
-    });
-
-    syncMode();
+    syncConfig();
     showReadyStatus();
 })();
