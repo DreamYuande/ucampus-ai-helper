@@ -2,7 +2,7 @@
 // @name         U校园 AI 答题助手（半自动 · 优化版）
 // @name:zh-CN   U校园 AI 答题助手
 // @namespace    https://tampermonkey.net/
-// @version      2.4.2
+// @version      2.4.3
 // @description  U校园网页答题助手，支持自定义 OpenAI 兼容 API、模型选择和手动或自动填入；答案由用户核对并提交。
 // @author       DreamYuande
 // @copyright    2026 DreamYuande
@@ -608,7 +608,7 @@
         if (typeof GM_getValue === 'function') {
             const saved = GM_getValue(CFG.API_STORE, null);
             if (saved && typeof saved.base === 'string') {
-                return { base: saved.base, key: String(saved.key || ''), model: String(saved.model || ''), saved: true };
+                return { base: saved.base, key: String(saved.key || ''), model: String(saved.model || ''), provider: saved.provider, saved: true };
             }
             return {
                 base: CFG.defaultBase,
@@ -1118,7 +1118,7 @@
             <div class="hd" id="hd">
                 <div class="heading">
                     <h2 class="t" id="panel-title" tabindex="-1">U校园 AI 答题助手</h2>
-                    <div class="version">v2.4.2</div>
+                    <div class="version">v2.4.3</div>
                 </div>
                 <button class="x" id="btn-min" title="收起" aria-label="收起为悬浮球" type="button">−</button>
             </div>
@@ -1143,9 +1143,16 @@
             <form class="bd settings" id="settings" aria-labelledby="panel-title" novalidate hidden>
                 <button class="ghost" id="btn-back" type="button" aria-controls="bd">返回答题</button>
                 <div class="field">
+                    <label for="api-provider">服务商</label>
+                    <select id="api-provider" aria-controls="base-field">
+                        <option value="deepseek">DeepSeek 官方</option>
+                        <option value="custom">自定义 API</option>
+                    </select>
+                </div>
+                <div class="field" id="base-field" hidden>
                     <label for="base">API 地址</label>
                     <input type="text" inputmode="url" id="base" placeholder="https://api.example.com/v1" aria-describedby="base-tip" autocomplete="off" spellcheck="false">
-                    <div class="tip" id="base-tip">填写服务商的 OpenAI 兼容 Base URL，例如 https://api.example.com/v1。</div>
+                    <div class="tip" id="base-tip">填写服务商提供的 OpenAI 兼容 Base URL。</div>
                 </div>
                 <div class="field">
                     <label for="key">API Key</label>
@@ -1198,6 +1205,8 @@
         btnSettings: byId(shadow, 'btn-settings'),
         btnBack: byId(shadow, 'btn-back'),
         settings: byId(shadow, 'settings'),
+        provider: byId(shadow, 'api-provider'),
+        baseField: byId(shadow, 'base-field'),
         base: byId(shadow, 'base'),
         key: byId(shadow, 'key'),
         keyTip: byId(shadow, 'key-tip'),
@@ -1236,7 +1245,7 @@
         ui.btnCopy.disabled = !!empty;
     }
 
-    const apiReady = (config) => !!config.model && (config.saved || !!config.key);
+    const apiReady = (config) => !!config.model && (isDeepSeekBase(config.base) ? !!config.key : config.saved || !!config.key);
 
     function syncConfig(config = getApiConfig()) {
         const model = apiReady(config) ? '模型：' + config.model : '未配置 API';
@@ -1360,8 +1369,34 @@
         el.className = kind ? 'st ' + kind : 'st';
     }
 
+    const isDeepSeekBase = (base) => base === CFG.defaultBase || base === CFG.defaultBase + '/v1';
+
+    function draftEndpoint() {
+        if (ui.provider.value === 'custom') return normalizeBase(ui.base.value);
+        const current = getApiConfig();
+        return isDeepSeekBase(current.base) ? current.base : CFG.defaultBase;
+    }
+
     function validDraftBase() {
-        try { return normalizeBase(ui.base.value); } catch (e) { return ''; }
+        try { return draftEndpoint(); } catch (e) { return ''; }
+    }
+
+    function syncProviderFields() {
+        ui.baseField.hidden = ui.provider.value !== 'custom';
+        ui.base.disabled = ui.baseField.hidden;
+        const base = validDraftBase();
+        if (base !== draftBase) {
+            if (typedKeyBase !== base) {
+                ui.key.value = '';
+                typedKeyBase = '';
+            }
+            ui.clearKey.checked = false;
+            const saved = getApiConfig();
+            ui.model.value = base === saved.base && (saved.saved || saved.key) ? saved.model : '';
+            draftBase = base;
+        }
+        resetModelList();
+        updateKeyHint();
     }
 
     function keyForBase(base) {
@@ -1376,9 +1411,9 @@
         const hasKey = !!saved.key && saved.base === validDraftBase();
         ui.clearKeyRow.hidden = !hasKey;
         if (!hasKey) ui.clearKey.checked = false;
-        ui.keyTip.textContent = hasKey
-            ? '留空会保留此地址已保存的 Key。'
-            : '仅在服务商需要认证时填写。Key 只发给此 API 地址。';
+        ui.keyTip.textContent = hasKey && !ui.clearKey.checked
+            ? '留空可沿用此地址的 Key。'
+            : ui.provider.value === 'deepseek' ? 'DeepSeek 官方需要 API Key。' : '无需认证的服务可留空。';
     }
 
     function renderModels() {
@@ -1404,7 +1439,7 @@
 
     async function refreshModels(force = false) {
         let base;
-        try { base = normalizeBase(ui.base.value); }
+        try { base = draftEndpoint(); }
         catch (e) {
             if (force) {
                 fieldStatus(ui.modelStatus, e.message, 'err');
@@ -1413,6 +1448,13 @@
             return;
         }
         const config = { base, key: keyForBase(base) };
+        if (ui.provider.value === 'deepseek' && !config.key) {
+            if (force) {
+                fieldStatus(ui.modelStatus, '请先填写 DeepSeek API Key。', 'warn');
+                ui.key.focus();
+            }
+            return;
+        }
         if (sameConnection(config, pendingFor) || (!force && sameConnection(config, loadedFor))) return;
 
         const requestId = ++listRequest;
@@ -1445,10 +1487,10 @@
         const config = getApiConfig();
         if (!formReady) {
             formReady = true;
-            ui.base.value = config.base;
-            ui.model.value = config.model;
-            draftBase = config.base;
-            resetModelList();
+            const official = isDeepSeekBase(config.base) && config.provider !== 'custom';
+            ui.provider.value = official ? 'deepseek' : 'custom';
+            ui.base.value = official ? '' : config.base;
+            syncProviderFields();
         }
         autoRunEpoch++;
         ui.bd.hidden = true;
@@ -1477,15 +1519,11 @@
 
     ui.btnSettings.addEventListener('click', showSettings);
     ui.btnBack.addEventListener('click', showHome);
-    ui.base.addEventListener('input', () => { resetModelList(); updateKeyHint(); });
-    ui.base.addEventListener('change', () => {
-        const base = validDraftBase();
-        if (base && base !== draftBase) {
-            if (ui.key.value && typedKeyBase !== base) ui.key.value = '';
-            ui.model.value = '';
-            draftBase = base;
-        }
+    ui.provider.addEventListener('change', () => {
+        syncProviderFields();
+        if (draftBase && keyForBase(draftBase)) void refreshModels();
     });
+    ui.base.addEventListener('input', syncProviderFields);
     ui.key.addEventListener('input', () => {
         typedKeyBase = validDraftBase();
         ui.clearKey.checked = false;
@@ -1511,13 +1549,23 @@
     ui.settings.addEventListener('submit', (e) => {
         e.preventDefault();
         let base;
-        try { base = normalizeBase(ui.base.value); }
+        try { base = draftEndpoint(); }
         catch (err) {
             fieldStatus(ui.settingsStatus, err.message, 'err');
             ui.base.focus();
             return;
         }
-        const config = { base, key: keyForBase(base), model: ui.model.value.trim() };
+        const config = { base, key: keyForBase(base), model: ui.model.value.trim(), provider: ui.provider.value };
+        if (isDeepSeekBase(base) && !config.key && !ui.clearKey.checked) {
+            fieldStatus(ui.settingsStatus, '请填写 DeepSeek API Key。', 'warn');
+            ui.key.focus();
+            return;
+        }
+        if (!config.model) {
+            fieldStatus(ui.settingsStatus, '请选择或填写模型 ID。', 'warn');
+            (ui.models.disabled ? ui.model : ui.models).focus();
+            return;
+        }
         try {
             if (typeof GM_setValue !== 'function') throw new Error('storage');
             GM_setValue(CFG.API_STORE, config);
@@ -1525,21 +1573,17 @@
             fieldStatus(ui.settingsStatus, '保存失败，请检查 Tampermonkey 是否启用。', 'err');
             return;
         }
-        ui.base.value = base;
+        if (config.provider === 'custom') ui.base.value = base;
         ui.model.value = config.model;
         ui.key.value = '';
+        typedKeyBase = '';
         ui.clearKey.checked = false;
         draftBase = base;
         updateKeyHint();
-        if (config.model) {
-            autoAttempts.clear();
-            resetAnswer();
-            showReadyStatus();
-            showHome();
-        } else {
-            fieldStatus(ui.settingsStatus, '请选择或填写模型 ID 后再保存。', 'warn');
-            ui.model.focus();
-        }
+        autoAttempts.clear();
+        resetAnswer();
+        showReadyStatus();
+        showHome();
     });
 
     /* ---------- 复制 ---------- */

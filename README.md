@@ -7,7 +7,7 @@
 1. 在浏览器安装 [Tampermonkey](https://www.tampermonkey.net/)。
 2. 从 [GitHub Releases](https://github.com/DreamYuande/ucampus-ai-helper/releases/latest) 下载发布的 `.user.js` 文件。也可以直接[打开最新版脚本](https://github.com/DreamYuande/ucampus-ai-helper/releases/latest/download/ucampus-ai-helper.user.js)。
 3. 如果浏览器打开 Tampermonkey 安装窗口，点击「安装」。如果只下载了文件，打开 Tampermonkey 管理面板，新建脚本并粘贴文件内容，保存即可。已安装旧版的用户可以直接替换原脚本内容，保留原有设置。
-4. 打开或刷新 U 校园课程页，从浮窗进入「API 设置」。
+4. 打开 [U 校园课程页面](https://ucontent.unipus.cn/)，进入具体课程并打开题目页，再从浮窗进入「API 设置」。
 
 从 v2.4.1 起，Tampermonkey 可通过脚本内置的 GitHub Releases 地址检查更新。如果旧版没有收到更新提示，访问上面的安装链接，或在原脚本编辑器中替换内容。
 
@@ -15,9 +15,10 @@
 
 | 选项 | 填写方式 |
 | --- | --- |
-| API 地址 | 填服务商提供的 OpenAI 兼容 Base URL，例如 `https://api.example.com/v1`。默认地址是 `https://api.deepseek.com`。保留服务商要求的路径前缀，如 `/v1`。 |
-| API Key | 填该服务商的 Key。服务商不要求认证时可留空。 |
-| 模型 ID | 从「获取列表」返回的结果中选取，或手动填写服务商提供的模型 ID。列表依赖服务商的 `/models` 接口。 |
+| 服务商 | 默认选择「DeepSeek 官方」，自动使用 `https://api.deepseek.com`；使用中转站或其他兼容服务时选择「自定义 API」。 |
+| API 地址 | 仅自定义模式显示。填服务商提供的 OpenAI 兼容 Base URL，例如 `https://api.example.com/v1`。 |
+| API Key | 填所选服务商的 Key。DeepSeek 官方必填；自定义服务不要求认证时可留空。 |
+| 模型 ID | 输入 Key 后可从自动获取的模型列表中选择，也可以点击「获取列表」或直接填写模型 ID。列表依赖服务商的 `/models` 接口。 |
 
 选好模型后点「保存设置」，脚本会返回题目页并开始识别。作答使用服务商的 `/chat/completions` 接口。
 
